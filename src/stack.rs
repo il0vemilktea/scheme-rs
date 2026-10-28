@@ -19,6 +19,11 @@ const BLOCK_SIZE: usize = 2048;
 /// 16 Kb block of memory.
 struct StackBlock {
     slots: [UnsafeCell<Value>; BLOCK_SIZE],
+    /// The continuation marks of the frame whose return address is in the slot
+    /// at the same index, as an association list. A slot without marks holds
+    /// `'()`, which is also what a zeroed slot reads as.
+    #[cfg(feature = "continuation-marks")]
+    marks: [UnsafeCell<Value>; BLOCK_SIZE],
     sealed: AtomicUsize,
 }
 
@@ -28,6 +33,15 @@ unsafe impl Sync for StackBlock {}
 impl StackBlock {
     fn new() -> Gc<Self> {
         unsafe { Gc::new_zeroed() }
+    }
+
+    /// The marks beside the slots that start at `segment`, a pointer into this
+    /// block's slots.
+    #[cfg(feature = "continuation-marks")]
+    fn marks_beside(&self, segment: NonNull<Value>) -> NonNull<Value> {
+        let slots: NonNull<Value> = NonNull::from_ref(&self.slots).cast();
+        let marks: NonNull<Value> = NonNull::from_ref(&self.marks).cast();
+        unsafe { marks.add(segment.offset_from_unsigned(slots)) }
     }
 }
 
@@ -39,6 +53,12 @@ unsafe impl Trace for StackBlock {
                 (*slot.get()).visit_children(visitor);
             }
         }
+        #[cfg(feature = "continuation-marks")]
+        for marks in self.marks.iter().take(sealed) {
+            unsafe {
+                (*marks.get()).visit_children(visitor);
+            }
+        }
     }
 
     unsafe fn finalize(&mut self) {
@@ -46,6 +66,12 @@ unsafe impl Trace for StackBlock {
         for slot in &mut self.slots[..sealed] {
             unsafe {
                 slot.get_mut().finalize();
+            }
+        }
+        #[cfg(feature = "continuation-marks")]
+        for marks in &mut self.marks[..sealed] {
+            unsafe {
+                marks.get_mut().finalize();
             }
         }
     }
@@ -194,6 +220,8 @@ impl StackRecord {
         for i in 0..self.len {
             unsafe {
                 let _ = self.segment.add(i).replace(Value::undefined());
+                #[cfg(feature = "continuation-marks")]
+                let _ = self.marks().add(i).replace(Value::null());
             }
         }
 
@@ -204,7 +232,12 @@ impl StackRecord {
         }
         self.len = new_stack.0.cap;
 
-        // Clone over all of the values:
+        // Clone over all of the values, and their marks:
+        #[cfg(feature = "continuation-marks")]
+        let (marks, new_marks) = (
+            self.marks(),
+            new_stack.0.block.marks_beside(new_stack.0.segment),
+        );
         for i in 0..new_stack.0.cap {
             unsafe {
                 self.segment
@@ -212,6 +245,10 @@ impl StackRecord {
                     .write(Value::from_raw_inc_rc(Value::as_raw(
                         new_stack.0.segment.add(i).as_ref(),
                     )));
+                #[cfg(feature = "continuation-marks")]
+                marks.add(i).write(Value::from_raw_inc_rc(Value::as_raw(
+                    new_marks.add(i).as_ref(),
+                )));
             }
         }
 
@@ -230,13 +267,19 @@ impl StackRecord {
         // Pop the value
         self.len -= 1;
 
-        unsafe { self.segment.add(self.len).replace(Value::undefined()) }
+        unsafe {
+            #[cfg(feature = "continuation-marks")]
+            let _ = self.marks().add(self.len).replace(Value::null());
+            self.segment.add(self.len).replace(Value::undefined())
+        }
     }
 
     #[inline]
     pub fn push(&mut self, value: Value) {
         unsafe {
             self.segment.add(self.len).write(value);
+            #[cfg(feature = "continuation-marks")]
+            self.marks().add(self.len).write(Value::null());
         }
 
         self.len += 1;
@@ -259,6 +302,50 @@ impl StackRecord {
             unsafe { self.segment.add(self.len - 1).as_ref() }
         }
     }
+
+    /// The marks beside this segment's slots.
+    #[cfg(feature = "continuation-marks")]
+    fn marks(&self) -> NonNull<Value> {
+        self.block.marks_beside(self.segment)
+    }
+
+    /// Replaces the marks of the frame on top of the stack with `update` of
+    /// them.
+    #[cfg(feature = "continuation-marks")]
+    pub fn update_top_marks(&mut self, update: impl FnOnce(&Value) -> Value) {
+        // A sealed segment can be shared with a captured continuation, so copy
+        // it into this one first, as an underflow does:
+        if self.len == 0 {
+            let next = self.next().clone();
+            self.reinstate(next);
+        }
+        unsafe {
+            let top = self.marks().add(self.len - 1);
+            let updated = update(top.as_ref());
+            let _ = top.replace(updated);
+        }
+    }
+
+    /// The marks of every frame on the stack that has any, from the top down.
+    #[cfg(feature = "continuation-marks")]
+    pub fn all_marks(&self) -> Vec<Value> {
+        let mut all = Vec::new();
+        let mut collect = |marks: NonNull<Value>, len: usize| {
+            for i in (0..len).rev() {
+                let marks = unsafe { marks.add(i).as_ref() };
+                if !marks.is_null() {
+                    all.push(marks.clone());
+                }
+            }
+        };
+        collect(self.marks(), self.len);
+        let mut next = self.next.as_ref();
+        while let Some(record) = next {
+            collect(record.0.block.marks_beside(record.0.segment), record.0.cap);
+            next = record.0.next.as_ref();
+        }
+        all
+    }
 }
 
 impl Drop for StackRecord {
@@ -266,6 +353,8 @@ impl Drop for StackRecord {
         for i in 0..self.len {
             unsafe {
                 let _ = self.segment.add(i).replace(Value::undefined());
+                #[cfg(feature = "continuation-marks")]
+                let _ = self.marks().add(i).replace(Value::null());
             }
         }
     }

@@ -1183,30 +1183,24 @@ impl<'a> ContBarrier<'a> {
         (params, child_barrier)
     }
 
-    /*
-
+    /// The values marked with `tag` on the frames of the call stack, from the
+    /// top down.
     #[cfg(feature = "continuation-marks")]
     pub(crate) fn current_marks(&self, tag: Symbol) -> Vec<Value> {
-        self.cont_stack
-            .frames
+        self.call_stack
+            .all_marks()
             .iter()
-            .rev()
-            .map(|frame| &frame.marks)
-            .flat_map(|marks| marks.get(&tag).cloned())
+            .filter_map(|marks| mark_value(marks, tag))
             .collect()
     }
 
+    /// Marks the frame on top of the call stack with `val` for `tag`,
+    /// replacing any value it had for `tag`.
     #[cfg(feature = "continuation-marks")]
     pub(crate) fn set_continuation_mark(&mut self, tag: Symbol, val: Value) {
-        self.cont_stack
-            .frames
-            .last_mut()
-            .unwrap()
-            .marks
-            .insert(tag, val);
+        self.call_stack
+            .update_top_marks(|marks| with_mark(marks, tag, val));
     }
-
-    */
 
     // TODO: We should certainly try to optimize these functions. Linear
     // searching isn't _great_, although in practice I can't imagine this stack
@@ -1440,6 +1434,40 @@ pub(crate) fn pop_dyn_stack(
 ) -> Application {
     barrier.pop_dyn_stack();
     barrier.call_cont(Args::from_list(args.0))
+}
+
+/// The value for `tag` in the marks of one frame, an association list.
+#[cfg(feature = "continuation-marks")]
+fn mark_value(marks: &Value, tag: Symbol) -> Option<Value> {
+    let mut rest = marks.clone();
+    while let Some((entry, next)) = rest.cast::<(Value, Value)>() {
+        if let Some((key, value)) = entry.cast::<(Value, Value)>()
+            && key.cast::<Symbol>() == Some(tag)
+        {
+            return Some(value);
+        }
+        rest = next;
+    }
+    None
+}
+
+/// The marks of one frame, with `tag` set to `val`.
+#[cfg(feature = "continuation-marks")]
+fn with_mark(marks: &Value, tag: Symbol, val: Value) -> Value {
+    let mut others = Vec::new();
+    let mut rest = marks.clone();
+    while let Some((entry, next)) = rest.cast::<(Value, Value)>() {
+        let key = entry.cast::<(Value, Value)>().map(|(key, _)| key);
+        if key.and_then(|key| key.cast::<Symbol>()) != Some(tag) {
+            others.push(entry);
+        }
+        rest = next;
+    }
+    let others = others
+        .into_iter()
+        .rev()
+        .fold(Value::null(), |list, entry| Value::cons(entry, list));
+    Value::cons(Value::cons(tag, val), others)
 }
 
 /*

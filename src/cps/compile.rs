@@ -463,6 +463,10 @@ fn compile_apply(
                 } else if let Some(proc) = maybe_proc
                     && let Some(known) = proc.to_known()
                     && known.matches_args(args.len())
+                    // A direct call to a known function sets no continuation
+                    // mark, so with marks on it's called like any procedure,
+                    // and a mistake in it has its own place in the trace.
+                    && !cfg!(feature = "continuation-marks")
                 {
                     let primop = if known.returns_value() {
                         PrimOp::CallKnown1

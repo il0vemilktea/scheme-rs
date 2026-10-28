@@ -603,11 +603,10 @@ unsafe extern "C" fn get_frame(op: *const (), span: *const ()) -> *const () {
 #[cfg(feature = "continuation-marks")]
 #[runtime_fn]
 unsafe extern "C" fn set_continuation_mark(
-    _tag: *const (),
-    _val: *const (),
-    _barrier: *mut ContBarrier,
+    tag: *const (),
+    val: *const (),
+    barrier: *mut ContBarrier,
 ) {
-    /*
     unsafe {
         let tag = Value::from_raw_inc_rc(tag);
         let val = Value::from_raw_inc_rc(val);
@@ -616,7 +615,6 @@ unsafe extern "C" fn set_continuation_mark(
             .unwrap()
             .set_continuation_mark(tag.cast().unwrap(), val);
     }
-     */
 }
 
 /// Create a boxed application that simply returns its arguments
