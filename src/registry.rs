@@ -416,8 +416,10 @@ impl RegistryInner {
             {
                 lib
             } else {
-                // Finally, try the embedded Stdlib
-                let file_name = format!("{path_suffix}.sls");
+                // Finally, try the embedded Stdlib. Its file names write `:`
+                // as `%3a`, as Chez Scheme does, because a crate can't hold a
+                // file with `:` in its name (`(srfi :2)` is `srfi/%3a2.sls`).
+                let file_name = format!("{}.sls", path_suffix.replace(':', "%3a"));
                 if let Some(lib) = Stdlib::get(&file_name) {
                     let contents = std::str::from_utf8(&lib.data).unwrap();
                     let form = Syntax::from_str(contents, Some(&file_name))?;
